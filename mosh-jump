@@ -1,11 +1,37 @@
 #!/usr/bin/env bash
 
 # Configuration
-REMOTE_JUMP_SSH_NAME=${HOST:-proxmox}
+REMOTE_JUMP_SSH_NAME=${HOST:-}
 REMOTE_JUMP_MOSH_PORTS=${PORTS:-60001:60008}
 
+# Show help
+if [[ "$1" == "-h" || "$1" == "--help" || -z "$REMOTE_JUMP_SSH_NAME" ]]; then
+    cat <<'HELP'
+Usage: HOST=<ssh-config-name> mosh-jump [destination]
+
+Establish a durable terminal session using the mobile shell (Mosh), 
+optionally jump to another host using SSH.
+
+Examples:
+  HOST=myserver mosh-jump              # Connect to myserver
+  HOST=myserver mosh-jump internal     # Connect to internal via myserver
+  PORTS=60010 HOST=myserver mosh-jump  # Use a custom port/range
+
+Environment Variables:
+  HOST      SSH config name (required)
+  PORTS     UDP port range for Mosh (default: 60001:60008)
+  DEBUG     Enable debug output if set
+
+Requirements:
+  - Jump server configured in ~/.ssh/config on the local machine
+  - Hosts configured in ~/.ssh/config on the jump server
+  - UDP ports open on jump server
+HELP
+    exit 0
+fi
+
 # Remote functions
-function install_mosh_on_the_remote() {
+function install_mosh() {
     if command -v mosh-server >/dev/null 2>&1; then
         return 0
     fi
@@ -48,19 +74,17 @@ function execute_on_the_remote() {
 if [[ -n "${DEBUG:-}" ]]; then set -x; fi
 
 # Get SSH configuration
-if [[ -n "$REMOTE_JUMP_SSH_NAME" ]]; then
-    REMOTE_JUMP_SSH_HOST=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^hostname / {print $2; exit}')
-    REMOTE_JUMP_SSH_PORT=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^port / {print $2; exit}')
-    REMOTE_JUMP_SSH_USER=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^user / {print $2; exit}')
+REMOTE_JUMP_SSH_HOST=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^hostname / {print $2; exit}')
+REMOTE_JUMP_SSH_PORT=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^port / {print $2; exit}')
+REMOTE_JUMP_SSH_USER=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^user / {print $2; exit}')
 
-    if [[ "$REMOTE_JUMP_SSH_USER" == "$USER" ]]; then 
-        unset REMOTE_JUMP_SSH_USER
-    fi
+if [[ "$REMOTE_JUMP_SSH_USER" == "$USER" ]]; then 
+    unset REMOTE_JUMP_SSH_USER
+fi
 
-    if [[ -z "$REMOTE_JUMP_SSH_HOST" || -z "$REMOTE_JUMP_SSH_PORT" ]]; then
-        echo "Error: SSH host '$REMOTE_JUMP_SSH_NAME' is not configured." >&2
-        exit 1
-    fi
+if [[ -z "$REMOTE_JUMP_SSH_HOST" || -z "$REMOTE_JUMP_SSH_PORT" ]]; then
+    echo "Error: SSH host '$REMOTE_JUMP_SSH_NAME' is not configured in ~/.ssh/config" >&2
+    exit 1
 fi
 
 # Build SSH command array
@@ -69,10 +93,16 @@ if [[ -n "${REMOTE_JUMP_SSH_USER:-}" ]]; then
     ssh_command+=("-l" "$REMOTE_JUMP_SSH_USER")
 fi
 
+# Install mosh locally if needed
+if ! install_mosh; then 
+    echo "Error: Failed to install mosh locally" >&2
+    exit 1
+fi
+
 # Install mosh on the jump server if needed
 "${ssh_command[@]}" "$REMOTE_JUMP_SSH_HOST" bash <<EOF
-$(declare -f install_mosh_on_the_remote)
-install_mosh_on_the_remote
+$(declare -f install_mosh)
+install_mosh
 EOF
 
 if [[ $? -ne 0 ]]; then
@@ -85,6 +115,12 @@ remote_args=""
 for arg in "$@"; do
     remote_args="$remote_args $(printf '%q' "$arg")"
 done
+
+# Fix locale
+if [[ -z "$LC_CTYPE" ]]; then
+    export LANG="en_US.UTF-8"
+    export LC_CTYPE="en_US.UTF-8"
+fi
 
 # Connect via mosh
 exec mosh --ssh="${ssh_command[*]}" -p "$REMOTE_JUMP_MOSH_PORTS" "$REMOTE_JUMP_SSH_HOST" -- bash \
