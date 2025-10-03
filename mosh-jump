@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+
+# Configuration
+REMOTE_JUMP_SSH_NAME=${HOST:-proxmox}
+REMOTE_JUMP_MOSH_PORTS=${PORTS:-60001:60008}
+
+# Remote functions
+function install_mosh_on_the_remote() {
+    if command -v mosh-server >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y mosh
+    elif command -v yum >/dev/null 2>&1; then
+        sudo yum install -y mosh
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y mosh
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm mosh
+    elif command -v brew >/dev/null 2>&1; then
+        brew install mosh
+    else
+        echo "Error: could not install mosh on the remote" >&2
+        return 1
+    fi
+}
+
+function execute_on_the_remote() {
+    if [[ ${1@L} == 'ssh' ]]; then
+        if [[ -z "${*:2}" ]]; then 
+            exec /usr/bin/env bash -l
+        else 
+            ssh_output_file=$(mktemp)
+            if ssh -T "${@:2}" true &>"$ssh_output_file"; then
+                rm "$ssh_output_file"
+                exec ssh "${@:2}"
+            else 
+                echo "Error: jumping via 'ssh ${*:2}' failed: $(cat "$ssh_output_file")" >&2
+                rm "$ssh_output_file"
+                exit 1
+            fi
+        fi
+    fi
+}
+
+# Enable debug mode if requested
+if [[ -n "${DEBUG:-}" ]]; then set -x; fi
+
+# Get SSH configuration
+if [[ -n "$REMOTE_JUMP_SSH_NAME" ]]; then
+    REMOTE_JUMP_SSH_HOST=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^hostname / {print $2; exit}')
+    REMOTE_JUMP_SSH_PORT=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^port / {print $2; exit}')
+    REMOTE_JUMP_SSH_USER=$(ssh -G "$REMOTE_JUMP_SSH_NAME" | awk '/^user / {print $2; exit}')
+
+    if [[ "$REMOTE_JUMP_SSH_USER" == "$USER" ]]; then 
+        unset REMOTE_JUMP_SSH_USER
+    fi
+
+    if [[ -z "$REMOTE_JUMP_SSH_HOST" || -z "$REMOTE_JUMP_SSH_PORT" ]]; then
+        echo "Error: SSH host '$REMOTE_JUMP_SSH_NAME' is not configured." >&2
+        exit 1
+    fi
+fi
+
+# Build SSH command array
+ssh_command=("ssh" "-p" "$REMOTE_JUMP_SSH_PORT")
+if [[ -n "${REMOTE_JUMP_SSH_USER:-}" ]]; then 
+    ssh_command+=("-l" "$REMOTE_JUMP_SSH_USER")
+fi
+
+# Install mosh on the jump server if needed
+"${ssh_command[@]}" "$REMOTE_JUMP_SSH_HOST" bash <<EOF
+$(declare -f install_mosh_on_the_remote)
+install_mosh_on_the_remote
+EOF
+
+if [[ $? -ne 0 ]]; then
+    echo "Error: Failed to install mosh on remote" >&2
+    exit 1
+fi
+
+# Build properly quoted arguments for remote execution
+remote_args=""
+for arg in "$@"; do
+    remote_args="$remote_args $(printf '%q' "$arg")"
+done
+
+# Connect via mosh
+exec mosh --ssh="${ssh_command[*]}" -p "$REMOTE_JUMP_MOSH_PORTS" "$REMOTE_JUMP_SSH_HOST" -- bash \
+    -c "$(declare -f execute_on_the_remote); execute_on_the_remote ssh$remote_args"
