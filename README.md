@@ -1,5 +1,7 @@
 # mossh
 
+![mossh demo](assets/mossh-demo.gif)
+
 **The easiest way to get started with the mobile shell (Mosh).**
 
 If you use SSH daily but struggle with dropped connections on trains, in cafes, or on mobile networks, `mossh` could for you. It's similar to interactive SSH, but with resiliance that survives network changes, roaming, and sleep.
