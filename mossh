@@ -106,7 +106,7 @@ function install_mosh() {
 
 function execute_on_the_remote() {
     if [[ ${1@L} == 'ssh' ]]; then
-        if [[ -z "${*:2}" ]]; then 
+        if [[ $# -eq 1 || -z "${*:2}" ]]; then 
             exec /usr/bin/env bash -l
         else 
             ssh_output_file=$(mktemp)
@@ -114,7 +114,7 @@ function execute_on_the_remote() {
                 rm "$ssh_output_file"
                 exec ssh "${@:2}"
             else 
-                echo "Error: jumping via 'ssh ${*:2}' failed: $(cat "$ssh_output_file")" >&2
+                echo "Error: jumping via _ssh ${*:2}_ failed: $(cat "$ssh_output_file")" >&2
                 rm "$ssh_output_file"
                 exit 1
             fi
@@ -177,8 +177,6 @@ fi
 if [[ -z "$public_ip" ]]; then 
     echo "Error: Failed to retrieve public IP on remote" >&2
     exit 1
-else
-    echo "Mosh will bind to $public_ip on port(s) $REMOTE_JUMP_MOSH_PORTS"
 fi
 
 # Build properly quoted arguments for remote SSH execution
@@ -194,10 +192,29 @@ if [[ -z "${LC_CTYPE:-}" ]] || [[ "$LC_CTYPE" != *.UTF-8 && "$LC_CTYPE" != *.utf
     export LC_CTYPE="en_US.UTF-8"
 fi
 
-# Connect via mosh
-exec mosh \
-    --ssh="${ssh_command[*]}" \
-    --bind-server="$public_ip" \
-    -p "$REMOTE_JUMP_MOSH_PORTS" \
-    "$REMOTE_JUMP_SSH_HOST" -- bash \
-    -c "$(declare -f execute_on_the_remote); execute_on_the_remote ssh$remote_args"
+# Spin up the mosh-server on the remote
+connect_string="$(
+    "${ssh_command[@]}" "$REMOTE_JUMP_SSH_HOST" \
+    "mosh-server new -s \
+        -p $REMOTE_JUMP_MOSH_PORTS \
+        -c $(mosh-client -c) \
+        -l LC_CTYPE=UTF-8 \
+        -- bash -c '
+            "$(declare -f execute_on_the_remote)"
+            execute_on_the_remote ssh$remote_args
+        ' 2>/dev/null | grep 'MOSH CONNECT'"
+)"
+
+if [[ $? -ne 0 || -z "$connect_string" ]]; then
+    echo "Error: failed to spin up mosh-server on the remote '$REMOTE_JUMP_SSH_NAME'" >&2
+    exit 1
+fi
+
+# Read connection parameters, which will be used by the client
+read _ _ MOSH_PORT MOSH_KEY <<< "$connect_string"
+
+# Invoke the client
+echo "Mosh will connect to $public_ip on port $MOSH_PORT"
+
+export MOSH_KEY
+exec mosh-client $public_ip $MOSH_PORT
