@@ -99,15 +99,34 @@ if ! install_mosh; then
     exit 1
 fi
 
-# Install mosh on the jump server if needed
-"${ssh_command[@]}" "$REMOTE_JUMP_SSH_HOST" bash <<EOF
+# Install mosh on the jump server if needed, and obtain
+# the external IP address, favouring IPv6 over IPv4
+public_ip="$("${ssh_command[@]}" "$REMOTE_JUMP_SSH_HOST" bash <<EOF
 $(declare -f install_mosh)
-install_mosh
+if ! install_mosh; then exit \$?; fi
+IP=\$(curl -s -6 ifconfig.me)
+if [[ -n "\$IP" ]]; then 
+    echo "\$IP"
+else 
+    IP=\$(curl -s -4 ifconfig.me)
+    if [[ -n "\$IP" ]]; then 
+        echo "\$IP"
+    fi
+fi
+exit 0
 EOF
+)"
 
 if [[ $? -ne 0 ]]; then
     echo "Error: Failed to install mosh on remote" >&2
     exit 1
+fi
+
+if [[ -z "$public_ip" ]]; then 
+    echo "Error: Failed to retrieve public IP on remote" >&2
+    exit 1
+else
+    echo "Mosh will bind to $public_ip on port(s) $REMOTE_JUMP_MOSH_PORTS"
 fi
 
 # Build properly quoted arguments for remote execution
@@ -123,5 +142,9 @@ if [[ -z "$LC_CTYPE" ]]; then
 fi
 
 # Connect via mosh
-exec mosh --ssh="${ssh_command[*]}" -p "$REMOTE_JUMP_MOSH_PORTS" "$REMOTE_JUMP_SSH_HOST" -- bash \
+exec mosh \
+    --ssh="${ssh_command[*]}" \
+    --bind-server="$public_ip" \
+    -p "$REMOTE_JUMP_MOSH_PORTS" \
+    "$REMOTE_JUMP_SSH_HOST" -- bash \
     -c "$(declare -f execute_on_the_remote); execute_on_the_remote ssh$remote_args"
