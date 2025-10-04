@@ -1,33 +1,85 @@
 #!/usr/bin/env bash
 
-# Configuration
-REMOTE_JUMP_SSH_NAME=${HOST:-}
-REMOTE_JUMP_MOSH_PORTS=${PORTS:-60001:60008}
+# Parse command-line arguments
+REMOTE_JUMP_MOSH_PORTS="60001:60008"
+REMOTE_JUMP_SSH_NAME=""
+SSH_JUMP_ARGS=()
 
-# Show help
-if [[ "$1" == "-h" || "$1" == "--help" || -z "$REMOTE_JUMP_SSH_NAME" ]]; then
+show_help() {
     cat <<'HELP'
-Usage: HOST=<ssh-config-name> mosh-jump [destination]
+mossh - Mobile Shell with SSH jump capability
 
-Establish a durable terminal session using the mobile shell (Mosh), 
+Usage: mossh [options] <host> [destination]
+
+Establish a durable terminal session using the mobile shell (Mosh),
 optionally jump to another host using SSH.
 
+Arguments:
+  host          SSH config name for the remote server (required)
+  destination   Optional host to SSH into after Mosh connection
+
+Options:
+  -p <ports>    UDP port range for Mosh (default: 60001:60008)
+                Can be a single port (60010) or range (60010:60020)
+  -h, --help    Show this help message
+
 Examples:
-  HOST=myserver mosh-jump              # Connect to myserver
-  HOST=myserver mosh-jump internal     # Connect to internal via myserver
-  PORTS=60010 HOST=myserver mosh-jump  # Use a custom port/range
+  mossh myserver                        # Connect to myserver via Mosh
+  mossh myserver internal               # Mosh to myserver, then SSH to internal
+  mossh -p 60010:60020 myserver         # Use custom port range
+  mossh -p 60010 myserver internal      # Single port with SSH jump
 
 Environment Variables:
-  HOST      SSH config name (required)
-  PORTS     UDP port range for Mosh (default: 60001:60008)
-  DEBUG     Enable debug output if set
+  DEBUG         Enable debug output if set
 
 Requirements:
-  - Jump server configured in ~/.ssh/config on the local machine
-  - Hosts configured in ~/.ssh/config on the jump server
-  - UDP ports open on jump server
+  - Remote configured in ~/.ssh/config on the local machine
+  - Hosts configured in ~/.ssh/config on the remote, if using SSH for jumping
+  - UDP ports open on remote server
 HELP
-    exit 0
+}
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    # Once we have the host, everything else goes to SSH
+    if [[ -n "$REMOTE_JUMP_SSH_NAME" ]]; then
+        SSH_JUMP_ARGS+=("$1")
+        shift
+        continue
+    fi
+
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -p)
+            if [[ -z "${2:-}" ]]; then
+                echo "Error: -p option requires a port or port range argument" >&2
+                echo "Try 'mossh --help' for more information." >&2
+                exit 1
+            fi
+            REMOTE_JUMP_MOSH_PORTS="$2"
+            shift 2
+            ;;
+        -*)
+            echo "Error: Unknown option: $1" >&2
+            echo "Try 'mossh --help' for more information." >&2
+            exit 1
+            ;;
+        *)
+            # First positional argument is the host
+            REMOTE_JUMP_SSH_NAME="$1"
+            shift
+            ;;
+    esac
+done
+
+# Check if host was specified
+if [[ -z "$REMOTE_JUMP_SSH_NAME" ]]; then
+    echo "Error: No host specified" >&2
+    echo "Try 'mossh --help' for more information." >&2
+    exit 1
 fi
 
 # Remote functions
@@ -129,14 +181,15 @@ else
     echo "Mosh will bind to $public_ip on port(s) $REMOTE_JUMP_MOSH_PORTS"
 fi
 
-# Build properly quoted arguments for remote execution
+# Build properly quoted arguments for remote SSH execution
 remote_args=""
-for arg in "$@"; do
+for arg in "${SSH_JUMP_ARGS[@]}"; do
     remote_args="$remote_args $(printf '%q' "$arg")"
 done
 
-# Fix locale
-if [[ -z "$LC_CTYPE" ]]; then
+# Fix locale - ensure we have a proper UTF-8 locale
+# LC_CTYPE must be a full locale (e.g., en_US.UTF-8), not just "UTF-8"
+if [[ -z "${LC_CTYPE:-}" ]] || [[ "$LC_CTYPE" != *.UTF-8 && "$LC_CTYPE" != *.utf8 ]]; then
     export LANG="en_US.UTF-8"
     export LC_CTYPE="en_US.UTF-8"
 fi
